@@ -3,6 +3,7 @@ let currentData = null;
 let currentZipPath = null;
 let currentExamIndex = 0;
 let currentQuestionIndex = 0;
+let completedExams = new Set(); // Store completed exam indices
 
 // Zoom state
 let zoomLevel = 1;
@@ -38,6 +39,8 @@ const fsNextBtn = document.getElementById('fsNextBtn');
 const fsToggleComments = document.getElementById('fsToggleComments');
 const fsCommentSidebar = document.getElementById('fsCommentSidebar');
 const fsCommentContent = document.getElementById('fsCommentContent');
+const commentBadge = document.getElementById('commentBadge');
+const commentBadgeText = document.getElementById('commentBadgeText');
 
 // Event listeners
 openZipBtn.addEventListener('click', handleSelectZip);
@@ -84,8 +87,16 @@ document.addEventListener('mouseup', handleDragEnd);
 
 fsToggleComments.addEventListener('click', (e) => {
   e.stopPropagation();
-  fsCommentSidebar.classList.toggle('collapsed');
+  fsCommentSidebar.classList.toggle('visible');
 });
+
+// Comment badge toggle
+if (commentBadge) {
+  commentBadge.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fsCommentSidebar.classList.toggle('visible');
+  });
+}
 
 // Keyboard navigation
 document.addEventListener('keydown', (e) => {
@@ -164,6 +175,9 @@ async function loadZip(zipPath) {
     currentExamIndex = 0;
     currentQuestionIndex = 0;
     
+    // Load completed exams from localStorage
+    loadCompletedExams();
+    
     // Hide welcome screen and show viewer immediately
     welcomeScreen.classList.add('hidden');
     viewerContent.classList.remove('hidden');
@@ -178,24 +192,65 @@ async function loadZip(zipPath) {
 function renderExamList() {
   examCount.textContent = currentData.length;
   
-  examList.innerHTML = currentData.map((exam, index) => `
-    <div class="exam-item ${index === currentExamIndex ? 'active' : ''}" data-index="${index}">
-      <div class="exam-item-name">${exam.name}</div>
-      <div class="exam-item-info">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-        </svg>
-        <span>${exam.questions.length} questions</span>
-      </div>
-    </div>
-  `).join('');
+  // Group exams by year and season
+  const groupedExams = groupExamsByYearAndSeason(currentData);
+  
+  // Render grouped exams
+  let html = '';
+  groupedExams.forEach(group => {
+    html += `<div class="exam-season-group">`;
+    html += `<div class="exam-season-header">${group.seasonYear}</div>`;
+    
+    group.exams.forEach(({ exam, originalIndex }) => {
+      html += `
+        <div class="exam-item ${originalIndex === currentExamIndex ? 'active' : ''} ${completedExams.has(originalIndex) ? 'completed' : ''}" data-index="${originalIndex}">
+          <div class="exam-item-header">
+            <input type="checkbox" class="exam-item-checkbox" ${completedExams.has(originalIndex) ? 'checked' : ''}>
+            <div class="exam-item-name">${exam.name}</div>
+          </div>
+          <div class="exam-item-info">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span>${exam.questions.length} questions</span>
+          </div>
+        </div>
+      `;
+    });
+    
+    html += `</div>`;
+  });
+  
+  examList.innerHTML = html;
   
   // Add click handlers
   document.querySelectorAll('.exam-item').forEach(item => {
-    item.addEventListener('click', () => {
+    // Main item click - show exam
+    item.addEventListener('click', (e) => {
+      if (e.target.classList.contains('exam-item-checkbox')) {
+        return; // Let checkbox handler take priority
+      }
       const index = parseInt(item.dataset.index);
       showExam(index);
     });
+    
+    // Checkbox toggle
+    const checkbox = item.querySelector('.exam-item-checkbox');
+    if (checkbox) {
+      checkbox.addEventListener('click', (e) => {
+        e.stopPropagation();
+      });
+      checkbox.addEventListener('change', (e) => {
+        const index = parseInt(item.dataset.index);
+        if (e.target.checked) {
+          completedExams.add(index);
+        } else {
+          completedExams.delete(index);
+        }
+        saveCompletedExams();
+        item.classList.toggle('completed');
+      });
+    }
   });
 }
 
@@ -307,7 +362,89 @@ function showQuestion(questionIndex) {
   // Update fullscreen comment if open
   if (fullscreenModal.classList.contains('active')) {
     fsCommentContent.innerHTML = commentHtml;
+    // Update comment badge with stats
+    updateCommentBadge(question.comment || '');
   }
+}
+
+function updateCommentBadge(commentText) {
+  if (!commentBadgeText) return;
+  
+  console.log('[DEBUG] updateCommentBadge called with full text length:', commentText?.length);
+  
+  const answerCounts = { A: 0, B: 0, C: 0, D: 0 };
+  let totalComments = 0;
+  
+  if (commentText && commentText.trim()) {
+    const commentLines = commentText.split('\n');
+    
+    // Skip metadata section (everything before the ==== separator)
+    let startIndex = 0;
+    for (let i = 0; i < commentLines.length; i++) {
+      if (commentLines[i].includes('====')) {
+        startIndex = i + 1;
+        break;
+      }
+    }
+    
+    // Parse comment entries starting after the separator
+    for (let i = startIndex; i < commentLines.length; i++) {
+      const line = commentLines[i];
+      const trimmedLine = line.trim();
+      
+      // Check if this line starts a new comment entry (#1 | ..., #2 | ...)
+      // Format: #N | User | Date
+      if (trimmedLine.match(/^#\d+\s*\|/)) {
+        totalComments++;
+        
+        // Structure: #N | User | Date
+        //          ID: ...
+        //          Content:
+        //          (answer text)
+        
+        // Look for answer starting from i+1 (next 5 lines)
+        for (let j = i + 1; j < Math.min(i + 6, commentLines.length); j++) {
+          const checkLine = commentLines[j].trim();
+          
+          // Check if this line is pure A-D (answer)
+          const answerMatch = checkLine.match(/^[A-D]+$/i);
+          if (answerMatch) {
+            const answer = checkLine[0].toUpperCase();
+            answerCounts[answer]++;
+            break; // Stop after finding answer
+          }
+        }
+      }
+    }
+  }
+  
+  // Build badge text with answer counts and most common answer
+  let badgeText = '';
+  let maxCount = 0;
+  const mostCommonAnswers = [];
+  
+  ['A', 'B', 'C', 'D'].forEach(letter => {
+    if (answerCounts[letter] > 0) {
+      if (badgeText) badgeText += ', ';
+      badgeText += `${letter}: ${answerCounts[letter]}`;
+      
+      if (answerCounts[letter] > maxCount) {
+        maxCount = answerCounts[letter];
+        mostCommonAnswers.length = 0; // Clear array
+        mostCommonAnswers.push(letter);
+      } else if (answerCounts[letter] === maxCount) {
+        mostCommonAnswers.push(letter);
+      }
+    }
+  });
+  
+  // Add most common answer only if there's no tie
+  if (mostCommonAnswers.length === 1) {
+    badgeText += `, Answer: ${mostCommonAnswers[0]}`;
+  }
+  
+  // Set badge text (empty if no answers found)
+  commentBadgeText.textContent = badgeText;
 }
 
 function parseComment(commentText) {
@@ -438,6 +575,9 @@ function openFullscreen() {
     fsCommentContent.innerHTML = commentContent.innerHTML;
     fullscreenModal.classList.add('active');
     
+    // Ensure sidebar is hidden by default
+    fsCommentSidebar.classList.remove('visible');
+    
     // Reset zoom state on open
     resetZoom();
     
@@ -447,6 +587,12 @@ function openFullscreen() {
     fsPrevBtn.disabled = isSingleQuestion;
     fsNextBtn.disabled = isSingleQuestion;
     fsQuestionIndicator.textContent = `${currentQuestionIndex + 1} / ${exam.questions.length}`;
+    
+    // Update badge with current question's comment
+    const question = exam.questions[currentQuestionIndex];
+    if (question) {
+      updateCommentBadge(question.comment || '');
+    }
   }
 }
 
@@ -689,6 +835,118 @@ window.electronAPI.onUpdateDownloaded(() => {
 
 // Check for updates on load
 window.electronAPI.checkForUpdate();
+
+// --- Exam Parsing and Grouping ---
+
+function parseExamSeason(examName) {
+  // Map of season abbreviations to full names and order
+  const seasonMap = {
+    'SP': { name: 'Spring', order: 1 },
+    'SU': { name: 'Summer', order: 2 },
+    'FA': { name: 'Fall', order: 3 },
+    'WI': { name: 'Winter', order: 4 },
+    'SPRING': { name: 'Spring', order: 1 },
+    'SUMMER': { name: 'Summer', order: 2 },
+    'FALL': { name: 'Fall', order: 3 },
+    'WINTER': { name: 'Winter', order: 4 }
+  };
+  
+  // Keyword-based approach: Search for any season keyword followed by a year
+  // Examples: "SWD392_SU25_Final Exam" -> SU25 -> Summer 2025
+  //           "PRU211m - FA 2023 - RE" -> FA 2023 -> Fall 2023
+  
+  // Build regex with all season keywords: (SP|SU|FA|WI|SPRING|SUMMER|FALL|WINTER)\s*[-–—_]?\s*(\d{2,4})
+  const seasonKeywords = Object.keys(seasonMap).join('|');
+  const pattern = new RegExp(`(${seasonKeywords})\\s*[-–—_]?\\s*(\\d{2,4})`, 'i');
+  
+  const match = examName.match(pattern);
+  if (match) {
+    const seasonCode = match[1].toUpperCase();
+    let year = match[2];
+    
+    // Make sure this is a known season
+    if (seasonMap[seasonCode]) {
+      // Normalize 2-digit year to 4-digit
+      if (year.length === 2) {
+        const yearNum = parseInt(year);
+        year = (yearNum < 50 ? 2000 : 1900) + yearNum;
+      } else {
+        year = parseInt(year);
+      }
+      
+      return {
+        season: seasonMap[seasonCode].name,
+        year: year,
+        order: seasonMap[seasonCode].order
+      };
+    }
+  }
+  
+  // Fallback: return unknown
+  return {
+    season: 'Other',
+    year: 0,
+    order: 999
+  };
+}
+
+function groupExamsByYearAndSeason(exams) {
+  // Parse each exam and create groups
+  const examsWithInfo = exams.map((exam, index) => ({
+    exam,
+    originalIndex: index,
+    ...parseExamSeason(exam.name)
+  }));
+  
+  // Group by year and season
+  const groups = {};
+  examsWithInfo.forEach(item => {
+    const key = `${item.year}-${item.order}`;
+    if (!groups[key]) {
+      groups[key] = {
+        year: item.year,
+        season: item.season,
+        order: item.order,
+        exams: []
+      };
+    }
+    groups[key].exams.push(item);
+  });
+  
+  // Convert to array and sort by year (desc) then season order (asc)
+  const sortedGroups = Object.values(groups).sort((a, b) => {
+    if (b.year !== a.year) {
+      return b.year - a.year; // Newest first
+    }
+    return a.order - b.order; // Spring → Summer → Fall → Winter
+  });
+  
+  // Format season-year display
+  return sortedGroups.map(group => ({
+    ...group,
+    seasonYear: group.year > 0 ? `${group.season} ${group.year}` : 'Other'
+  }));
+}
+function loadCompletedExams() {
+  try {
+    const saved = localStorage.getItem('completedExams');
+    completedExams = new Set(saved ? JSON.parse(saved) : []);
+  } catch (error) {
+    console.error('Failed to load completed exams:', error);
+    completedExams = new Set();
+  }
+}
+
+function saveCompletedExams() {
+  try {
+    localStorage.setItem('completedExams', JSON.stringify(Array.from(completedExams)));
+  } catch (error) {
+    console.error('Failed to save completed exams:', error);
+  }
+}
+
+// Load completed exams on app start
+loadCompletedExams();
 
 // Display App Version
 (async () => {
